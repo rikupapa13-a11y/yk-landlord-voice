@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>地主活動 音声入力</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #f5f5f5;
+      font-family: Arial, "Noto Sans JP", sans-serif;
+      color: #222;
+    }
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 14px;
+      padding: 22px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+    }
+    h1 {
+      margin: 4px 0 10px;
+      text-align: center;
+      font-size: 25px;
+    }
+    .lead {
+      margin: 0 0 18px;
+      text-align: center;
+      color: #555;
+      line-height: 1.6;
+      font-size: 15px;
+    }
+    .status {
+      min-height: 48px;
+      margin-bottom: 14px;
+      padding: 12px;
+      border-radius: 9px;
+      background: #f7f9fc;
+      line-height: 1.55;
+      font-size: 15px;
+    }
+    .status.listening {
+      background: #fff4e5;
+      font-weight: 700;
+    }
+    .status.success {
+      background: #e6f4ea;
+      color: #137333;
+      font-weight: 700;
+    }
+    .status.error {
+      background: #fce8e6;
+      color: #b3261e;
+      font-weight: 700;
+    }
+    .button-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 9px;
+      padding: 15px 12px;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+    .start { background: #1a73e8; color: #fff; }
+    .stop { background: #e8eaed; color: #222; }
+    .apply { background: #137333; color: #fff; margin-top: 14px; }
+    .copy { background: #f1f3f4; color: #222; margin-top: 10px; }
+    label {
+      display: block;
+      margin: 12px 0 7px;
+      font-weight: 700;
+      font-size: 16px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 260px;
+      resize: vertical;
+      border: 1px solid #bbb;
+      border-radius: 9px;
+      padding: 12px;
+      font-size: 18px;
+      line-height: 1.6;
+      background: #fff;
+    }
+    textarea[readonly] { background: #fafafa; }
+    .counter {
+      margin-top: 6px;
+      text-align: right;
+      color: #666;
+      font-size: 13px;
+    }
+    .note {
+      margin-top: 14px;
+      color: #666;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    @media (max-width: 600px) {
+      body { padding: 10px; }
+      .container { padding: 18px 14px; border-radius: 10px; }
+      h1 { font-size: 22px; }
+      .button-grid { grid-template-columns: 1fr; }
+      button { font-size: 17px; }
+      textarea { min-height: 220px; font-size: 17px; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>地主活動 音声入力</h1>
+  <p class="lead">「音声認識を開始」を押して、そのまま話してください。</p>
+
+  <div id="status" class="status">音声入力を開始できます。</div>
+
+  <div class="button-grid">
+    <button id="startButton" class="start" type="button">🎤 音声認識を開始</button>
+    <button id="stopButton" class="stop" type="button" disabled>⏹ 音声認識を停止</button>
+  </div>
+
+  <label for="transcript">文字起こし結果</label>
+  <textarea id="transcript" maxlength="20000" placeholder="話した内容がここに表示されます。停止後は手修正できます。"></textarea>
+  <div class="counter"><span id="charCount">0</span> / 20000文字</div>
+
+  <button id="applyButton" class="apply" type="button" disabled>この内容を元の画面に反映</button>
+  <button id="copyButton" class="copy" type="button">文字をコピー</button>
+
+  <div class="note">
+    音声ファイルはこのページには保存しません。ブラウザの音声認識機能を利用します。
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const MAX_LENGTH = 20000;
+  const MESSAGE_SOURCE = 'YK_LANDLORD_VOICE';
+
+  const statusEl = document.getElementById('status');
+  const transcriptEl = document.getElementById('transcript');
+  const charCountEl = document.getElementById('charCount');
+  const startButton = document.getElementById('startButton');
+  const stopButton = document.getElementById('stopButton');
+  const applyButton = document.getElementById('applyButton');
+  const copyButton = document.getElementById('copyButton');
+
+  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  let recognition = null;
+  let shouldListen = false;
+  let isRecognizing = false;
+  let restartTimer = null;
+  let finalText = '';
+  let pendingSend = false;
+  let micPermissionConfirmed = false;
+  let fatalRecognitionError = false;
+
+  function setStatus(message, type = '') {
+    statusEl.textContent = message;
+    statusEl.className = 'status' + (type ? ' ' + type : '');
+  }
+
+  function updateUi() {
+    const text = transcriptEl.value || '';
+    charCountEl.textContent = String(text.length);
+
+    const validText = text.trim().length > 0 && text.length <= MAX_LENGTH;
+    startButton.disabled = !SpeechRecognitionCtor || shouldListen || isRecognizing;
+    stopButton.disabled = !shouldListen && !isRecognizing;
+    applyButton.disabled = !validText;
+    transcriptEl.readOnly = shouldListen || isRecognizing;
+  }
+
+  function joinText(base, next) {
+    const a = String(base || '').trim();
+    const b = String(next || '').trim();
+    if (!a) return b;
+    if (!b) return a;
+    return a + '\n' + b;
+  }
+
+  function renderTranscript(interimText = '') {
+    const displayText = joinText(finalText, interimText);
+    transcriptEl.value = displayText.slice(0, MAX_LENGTH);
+    updateUi();
+  }
+
+  async function confirmMicrophonePermission() {
+    if (micPermissionConfirmed) return true;
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return true;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(track => track.stop());
+      micPermissionConfirmed = true;
+      return true;
+    } catch (error) {
+      if (error && (error.name === 'NotAllowedError' || error.name === 'SecurityError')) {
+        setStatus('マイクの使用が許可されていません。ブラウザのサイト設定でマイクを許可してから、もう一度お試しください。', 'error');
+      } else if (error && error.name === 'NotFoundError') {
+        setStatus('利用できるマイクが見つかりません。端末のマイク設定を確認してください。', 'error');
+      } else if (error && error.name === 'NotReadableError') {
+        setStatus('マイクを利用できません。他のアプリがマイクを使用していないか確認してください。', 'error');
+      } else {
+        setStatus('マイクの起動に失敗しました。ブラウザを再読み込みして、もう一度お試しください。', 'error');
+      }
+      return false;
+    }
+  }
+
+  function createRecognition() {
+    if (!SpeechRecognitionCtor) return null;
+
+    const instance = new SpeechRecognitionCtor();
+    instance.lang = 'ja-JP';
+    instance.interimResults = true;
+    instance.continuous = true;
+    instance.maxAlternatives = 1;
+
+    instance.onstart = () => {
+      isRecognizing = true;
+      fatalRecognitionError = false;
+      setStatus('🎤 音声を聞いています。話してください。', 'listening');
+      updateUi();
+    };
+
+    instance.onresult = event => {
+      let interimText = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const resultText = event.results[i][0].transcript || '';
+        if (event.results[i].isFinal) {
+          finalText = joinText(finalText, resultText);
+        } else {
+          interimText += resultText;
+        }
+      }
+
+      renderTranscript(interimText);
+    };
+
+    instance.onerror = event => {
+      const code = event && event.error ? event.error : 'unknown';
+
+      if (code === 'not-allowed' || code === 'service-not-allowed') {
+        fatalRecognitionError = true;
+        shouldListen = false;
+        setStatus('マイクまたは音声認識の利用が許可されていません。ブラウザの権限設定を確認してください。', 'error');
+      } else if (code === 'audio-capture') {
+        fatalRecognitionError = true;
+        shouldListen = false;
+        setStatus('マイクを取得できませんでした。端末のマイク設定を確認してください。', 'error');
+      } else if (code === 'network') {
+        fatalRecognitionError = true;
+        shouldListen = false;
+        setStatus('音声認識サービスとの通信でエラーが発生しました。通信環境を確認してください。', 'error');
+      } else if (code === 'no-speech') {
+        setStatus('音声を検出できませんでした。続けて待機します。', 'listening');
+      } else if (code !== 'aborted') {
+        setStatus('音声認識でエラーが発生しました: ' + code, 'error');
+      }
+
+      updateUi();
+    };
+
+    instance.onend = () => {
+      isRecognizing = false;
+      recognition = null;
+      updateUi();
+
+      if (pendingSend) {
+        pendingSend = false;
+        sendToOpener();
+        return;
+      }
+
+      if (shouldListen && !fatalRecognitionError) {
+        clearTimeout(restartTimer);
+        restartTimer = setTimeout(() => {
+          startRecognitionEngine();
+        }, 500);
+        return;
+      }
+
+      if (!fatalRecognitionError) {
+        setStatus('音声入力を停止しました。内容を確認し、必要なら修正してください。', 'success');
+      }
+    };
+
+    return instance;
+  }
+
+  function startRecognitionEngine() {
+    if (!shouldListen || fatalRecognitionError) return;
+
+    try {
+      recognition = createRecognition();
+      if (!recognition) {
+        shouldListen = false;
+        setStatus('このブラウザは音声認識に対応していません。Chrome または Safari の最新版でお試しください。', 'error');
+        updateUi();
+        return;
+      }
+      recognition.start();
+    } catch (error) {
+      clearTimeout(restartTimer);
+      restartTimer = setTimeout(() => {
+        if (shouldListen) startRecognitionEngine();
+      }, 700);
+    }
+  }
+
+  async function startVoiceInput() {
+    if (!SpeechRecognitionCtor) {
+      setStatus('このブラウザは音声認識に対応していません。Chrome または Safari の最新版でお試しください。', 'error');
+      return;
+    }
+
+    if (shouldListen || isRecognizing) return;
+
+    const permissionOk = await confirmMicrophonePermission();
+    if (!permissionOk) return;
+
+    finalText = transcriptEl.value.trim();
+    fatalRecognitionError = false;
+    shouldListen = true;
+    setStatus('音声認識を開始しています...', 'listening');
+    updateUi();
+    startRecognitionEngine();
+  }
+
+  function stopVoiceInput() {
+    shouldListen = false;
+    clearTimeout(restartTimer);
+
+    if (recognition && isRecognizing) {
+      try {
+        recognition.stop();
+      } catch (error) {
+        isRecognizing = false;
+        recognition = null;
+        updateUi();
+      }
+    } else {
+      isRecognizing = false;
+      recognition = null;
+      setStatus('音声入力を停止しました。内容を確認し、必要なら修正してください。', 'success');
+      updateUi();
+    }
+  }
+
+  function sendToOpener() {
+    const text = transcriptEl.value.trim();
+
+    if (!text) {
+      setStatus('反映する文字起こしデータがありません。', 'error');
+      updateUi();
+      return;
+    }
+
+    if (!window.opener || window.opener.closed) {
+      setStatus('元の地主活動登録画面が見つかりません。「文字をコピー」を使って元の画面へ貼り付けてください。', 'error');
+      return;
+    }
+
+    try {
+      window.opener.postMessage({
+        source: MESSAGE_SOURCE,
+        type: 'TRANSCRIPT',
+        text,
+        version: 1
+      }, '*');
+
+      setStatus('元の画面へ反映しました。この画面を閉じます。', 'success');
+      setTimeout(() => window.close(), 600);
+    } catch (error) {
+      setStatus('元の画面への反映に失敗しました。「文字をコピー」を使ってください。', 'error');
+    }
+  }
+
+  function applyTranscript() {
+    if (shouldListen || isRecognizing) {
+      pendingSend = true;
+      shouldListen = false;
+      clearTimeout(restartTimer);
+
+      if (recognition) {
+        try {
+          recognition.stop();
+          return;
+        } catch (error) {
+          recognition = null;
+          isRecognizing = false;
+        }
+      }
+    }
+
+    sendToOpener();
+  }
+
+  async function copyTranscript() {
+    const text = transcriptEl.value.trim();
+    if (!text) {
+      setStatus('コピーする文字起こしデータがありません。', 'error');
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus('文字起こしデータをコピーしました。', 'success');
+    } catch (error) {
+      transcriptEl.focus();
+      transcriptEl.select();
+      setStatus('自動コピーできませんでした。選択された文字を端末のコピー操作でコピーしてください。', 'error');
+    }
+  }
+
+  transcriptEl.addEventListener('input', () => {
+    if (!transcriptEl.readOnly) {
+      finalText = transcriptEl.value.trim();
+    }
+    updateUi();
+  });
+
+  startButton.addEventListener('click', startVoiceInput);
+  stopButton.addEventListener('click', stopVoiceInput);
+  applyButton.addEventListener('click', applyTranscript);
+  copyButton.addEventListener('click', copyTranscript);
+
+  window.addEventListener('beforeunload', () => {
+    shouldListen = false;
+    clearTimeout(restartTimer);
+    if (recognition) {
+      try { recognition.abort(); } catch (error) { /* noop */ }
+    }
+  });
+
+  if (!SpeechRecognitionCtor) {
+    setStatus('このブラウザは音声認識に対応していません。Chrome または Safari の最新版でお試しください。', 'error');
+  }
+
+  updateUi();
+})();
+</script>
+</body>
+</html>
