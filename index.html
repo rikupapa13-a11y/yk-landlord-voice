@@ -58,7 +58,7 @@
     }
     .button-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr;
       gap: 10px;
       margin-bottom: 16px;
     }
@@ -76,7 +76,7 @@
       opacity: 0.45;
     }
     .start { background: #1a73e8; color: #fff; }
-    .stop { background: #e8eaed; color: #222; }
+    .stop-active { background: #d93025; color: #fff; }
     .apply { background: #137333; color: #fff; margin-top: 14px; }
     .copy { background: #f1f3f4; color: #222; margin-top: 10px; }
     label {
@@ -127,8 +127,7 @@
   <div id="status" class="status">音声入力を開始できます。</div>
 
   <div class="button-grid">
-    <button id="startButton" class="start" type="button">🎤 音声認識を開始</button>
-    <button id="stopButton" class="stop" type="button" disabled>⏹ 音声認識を停止</button>
+    <button id="toggleButton" class="start" type="button">🎤 音声認識を開始</button>
   </div>
 
   <label for="transcript">文字起こし結果</label>
@@ -153,8 +152,7 @@
   const statusEl = document.getElementById('status');
   const transcriptEl = document.getElementById('transcript');
   const charCountEl = document.getElementById('charCount');
-  const startButton = document.getElementById('startButton');
-  const stopButton = document.getElementById('stopButton');
+  const toggleButton = document.getElementById('toggleButton');
   const applyButton = document.getElementById('applyButton');
   const copyButton = document.getElementById('copyButton');
 
@@ -179,10 +177,19 @@
     charCountEl.textContent = String(text.length);
 
     const validText = text.trim().length > 0 && text.length <= MAX_LENGTH;
-    startButton.disabled = !SpeechRecognitionCtor || shouldListen || isRecognizing;
-    stopButton.disabled = !shouldListen && !isRecognizing;
-    applyButton.disabled = !validText;
-    transcriptEl.readOnly = shouldListen || isRecognizing;
+    const listening = shouldListen || isRecognizing;
+
+    toggleButton.disabled = !SpeechRecognitionCtor;
+    toggleButton.textContent = listening ? '⏹ 音声認識を停止' : '🎤 音声認識を開始';
+    toggleButton.className = listening ? 'stop-active' : 'start';
+
+    const hasOpener = Boolean(window.opener && !window.opener.closed);
+    applyButton.disabled = !validText || !hasOpener;
+    applyButton.textContent = hasOpener
+      ? 'この内容を元の画面に反映'
+      : '元の画面から開くと反映できます';
+
+    transcriptEl.readOnly = listening;
   }
 
   function joinText(base, next) {
@@ -439,8 +446,13 @@
     updateUi();
   });
 
-  startButton.addEventListener('click', startVoiceInput);
-  stopButton.addEventListener('click', stopVoiceInput);
+  toggleButton.addEventListener('click', () => {
+    if (shouldListen || isRecognizing) {
+      stopVoiceInput();
+    } else {
+      startVoiceInput();
+    }
+  });
   applyButton.addEventListener('click', applyTranscript);
   copyButton.addEventListener('click', copyTranscript);
 
